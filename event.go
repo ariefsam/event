@@ -8,8 +8,9 @@ import (
 	"os"
 	"time"
 
+	"sync/atomic"
+
 	"github.com/hpcloud/tail"
-	"github.com/teris-io/shortid"
 )
 
 type Event struct {
@@ -23,10 +24,10 @@ type EventHandler func(Event)
 
 var EventListener map[string][]EventHandler
 var EventChannel chan Event
-var TotalEventWritten uint32
+var TotalEventWritten uint64
 
 func init() {
-	EventChannel = make(chan Event, 1000000)
+	EventChannel = make(chan Event, 1)
 	EventListener = make(map[string][]EventHandler)
 	read, err := ioutil.ReadFile(ConfigFilename)
 	if err != nil {
@@ -58,59 +59,74 @@ var cPayload ChangeLogFilePayload
 
 const ConfigFilename string = "storage/filename.cfg"
 
+func init() {
+	log.Println(time.Now().UnixNano())
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+}
+
 func EventWriter() {
-
+	// rl := rate.New(1000000, time.Millisecond)
+	f, err := os.OpenFile(WriteFilename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	defer func() {
+		log.Println("Udahan")
+	}()
 	for Event := range EventChannel {
+		// rl.Wait()
 
-		Event.Timestamp = time.Now().Unix()
+		Event.Timestamp = time.Now().UnixNano()
 
 		eventLog, err := json.Marshal(Event)
 		if err != nil {
-			log.Panic("Failed to save event")
+			log.Println("Failed to save event")
 		} else {
-			TotalEventWritten++
-
-			f, err := os.OpenFile(WriteFilename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
-			if err != nil {
-				panic(err)
-			}
+			atomic.AddUint64(&TotalEventWritten, 1)
 
 			if _, err = f.WriteString(string(eventLog) + "\n"); err != nil {
-				panic(err)
+				log.Println(err)
 			}
-			f.Close()
+			// log.Println(eventLog)
+			// log.Println("Total Event Written", TotalEventWritten)
 
-			if TotalEventWritten%10000 == 0 {
-				sid, _ := shortid.New(1, shortid.DefaultABC, 1)
-				uid, _ := sid.Generate()
-				NewFilename = "storage/event-" + uid
-				ChangeLogFile.ID = fmt.Sprintf("%d", uid)
-				ChangeLogFile.Name = "ChangeLogFile"
-				cPayload.CurrentFilename = WriteFilename
-				cPayload.NextFilename = NewFilename
-				payload, _ := json.Marshal(cPayload)
-				ChangeLogFile.Payload = string(payload)
-				eventLog, _ = json.Marshal(ChangeLogFile)
-				f, err := os.OpenFile(WriteFilename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
-				if err != nil {
-					panic(err)
-				}
+			// if TotalEventWritten%10000 == 0 {
 
-				if _, err = f.WriteString(string(eventLog) + "\n"); err != nil {
-					panic(err)
-				}
-				f.Close()
-				WriteFilename = NewFilename
+			// 	wg.Add(1)
+			// 	go func() {
+			// 		uid := primitive.NewObjectID().Hex()
+			// 		NewFilename = "storage/event-" + uid
+			// 		ChangeLogFile.ID = fmt.Sprintf("%s", uid)
+			// 		ChangeLogFile.Name = "ChangeLogFile"
+			// 		cPayload.CurrentFilename = WriteFilename
+			// 		cPayload.NextFilename = NewFilename
+			// 		payload, _ := json.Marshal(cPayload)
+			// 		ChangeLogFile.Payload = string(payload)
+			// 		eventLog, _ = json.Marshal(ChangeLogFile)
+			// 		f, err := os.OpenFile(WriteFilename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+			// 		if err != nil {
+			// 			panic(err)
+			// 		}
 
-				err = ioutil.WriteFile(ConfigFilename, []byte(WriteFilename), 0600)
-				if err != nil {
-					panic(err)
-				}
-			}
+			// 		if _, err = f.WriteString(string(eventLog) + "\n"); err != nil {
+			// 			panic(err)
+			// 		}
+			// 		f.Close()
+			// 		WriteFilename = NewFilename
+
+			// 		err = ioutil.WriteFile(ConfigFilename, []byte(WriteFilename), 0600)
+			// 		if err != nil {
+			// 			panic(err)
+			// 		}
+			// 		wg.Done()
+			// 	}()
+			// }
 
 		}
 
 	}
+
 }
 
 func Loader() {
@@ -118,16 +134,17 @@ func Loader() {
 	var LogName string
 	var ChangeLogPayload ChangeLogFilePayload
 	LogName = "storage/event.log"
+	var lineCount int32
 	for true {
 		t, err := tail.TailFile(LogName, tail.Config{Follow: true})
 		if err != nil {
 			panic(err)
 		}
 		for line := range t.Lines {
-			//fmt.Println(line.Text)
+			atomic.AddInt32(&lineCount, 1)
 			err = json.Unmarshal([]byte(line.Text), &event_data)
 			if err != nil {
-				panic("error read event")
+				log.Println("error read event")
 			} else {
 				for _, value := range EventListener[event_data.Name] {
 					value(event_data)
